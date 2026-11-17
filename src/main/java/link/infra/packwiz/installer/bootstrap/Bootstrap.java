@@ -19,14 +19,13 @@ import java.util.List;
 
 public class Bootstrap {
 
-	private static final String DEFAULT_UPDATE_URL = "https://api.github.com/repos/comp500/packwiz-installer/releases/latest";
+	private static final String DEFAULT_UPDATE_URL = "https://api.github.com/repos/THEY-modpack/packwiz-installer/releases/latest";
 	public static final String JAR_NAME = "packwiz-installer.jar";
 
 	private static String updateURL = DEFAULT_UPDATE_URL;
 	private static boolean skipUpdate = false;
 	private static boolean useGUI = true;
 	private static String jarPath = null;
-	private static String accessToken = null;
 
 	public static void init(String[] args) {
 		try {
@@ -86,13 +85,13 @@ public class Bootstrap {
 		}
 
 		System.out.println("Current version is: " + currVersion);
-		System.out.println("New version is: " + ghRelease.tagName);
-		if (!ghRelease.tagName.equals(currVersion)) {
+		System.out.println("New version is: " + ghRelease.tagName());
+		if (!ghRelease.tagName().equals(currVersion)) {
 			System.out.println("Attempting to update...");
 			RollbackHandler backup = new RollbackHandler(jarPath);
 
 			try {
-				downloadUpdate(ghRelease.downloadURL, ghRelease.assetURL, jarPath);
+				downloadUpdate(ghRelease.downloadUrl(), jarPath);
 			} catch (InterruptedIOException e) {
 				// User did this, don't show the error
 				try {
@@ -137,7 +136,6 @@ public class Bootstrap {
 	private static void parseOptions(String[] args) throws ParseException {
 		Options options = new Options();
 		options.addOption(null, "bootstrap-update-url", true, "Github API URL for checking for updates");
-		options.addOption(null, "bootstrap-update-token", true, "Github API Access Token, for private repositories");
 		options.addOption(null, "bootstrap-no-update", false, "Don't update packwiz-installer");
 		options.addOption(null, "bootstrap-main-jar", true, "Location of the packwiz-installer JAR file");
 		options.addOption("g", "no-gui", false, "Don't display a GUI to show update progress");
@@ -163,10 +161,6 @@ public class Bootstrap {
 
 		if (cmd.hasOption("bootstrap-update-url")) {
 			updateURL = cmd.getOptionValue("bootstrap-update-url");
-		}
-		
-		if (cmd.hasOption("bootstrap-update-token")) {
-			accessToken = cmd.getOptionValue("bootstrap-update-token");
 		}
 
 		if (cmd.hasOption("bootstrap-no-update")) {
@@ -201,11 +195,10 @@ public class Bootstrap {
 		return argsList.toArray(new String[0]);
 	}
 
-	private static class Release {
-		String tagName = null;
-		String downloadURL = null;
-		String assetURL = null;
-	}
+	private record Release(
+			String tagName,
+			String downloadUrl
+	) {}
 
 	private static class GithubException extends Exception {
 		private static final long serialVersionUID = 3843811090801607241L;
@@ -220,20 +213,18 @@ public class Bootstrap {
 	}
 
 	private static Release requestRelease() throws IOException, GithubException {
-		Release rel = new Release();
-
 		URL url = new URL(updateURL);
 		URLConnection conn = url.openConnection();
 
-		addAuthorizationHeader(conn);
-		// 30 second read timeout
 		conn.setReadTimeout(30 * 1000);
+
 		InputStream in;
 		if (useGUI) {
 			in = new ConnMonitorInputStream(conn, "Checking for packwiz-installer updates...", null);
 		} else {
 			in = conn.getInputStream();
 		}
+
 		Reader streamReader = new InputStreamReader(in);
 		JsonObject object;
 		try {
@@ -244,12 +235,15 @@ public class Bootstrap {
 		}
 		streamReader.close();
 
-		rel.tagName = getStringProperty("tag_name", object, "Tag name");
+		String tagName = getStringProperty("tag_name", object, "Tag name");
 
 		JsonValue assets = object.get("assets");
 		if (assets == null || !assets.isArray()) {
 			throw new GithubException("Assets array cannot be found");
 		}
+
+		String downloadUrl = null;
+
 		for (JsonValue assetValue : assets.asArray()) {
 			if (!assetValue.isObject()) {
 				throw new GithubException();
@@ -262,19 +256,15 @@ public class Bootstrap {
 				continue;
 			}
 
-			rel.downloadURL = getAssetUrl("browser_download_url", asset);
-			rel.assetURL = getAssetUrl("url", asset);
+			downloadUrl = getStringProperty("browser_download_url", asset, "Asset Download URL");
 			break;
 		}
-		if (rel.tagName == null) {
-			throw new GithubException("Latest release asset cannot be found");
+
+		if (downloadUrl == null) {
+			throw new GithubException("Release asset '" + JAR_NAME + "' cannot be found");
 		}
 
-		return rel;
-	}
-
-	private static String getAssetUrl(String property, JsonObject asset) throws GithubException {
-		return getStringProperty(property, asset, "Asset Download URL property");
+		return new Release(tagName, downloadUrl);
 	}
 	
 	private static String getStringProperty(String property, JsonObject obj, String displayName) throws GithubException {
@@ -285,11 +275,10 @@ public class Bootstrap {
 		return value.asString();
 	}
 
-	private static void downloadUpdate(String downloadURL, String assetURL, String path) throws IOException {
+	private static void downloadUpdate(String downloadURL, String path) throws IOException {
 		URL url = new URL(downloadURL);
 		URLConnection conn = url.openConnection();
 
-		addAuthorizationHeader(conn);
 		conn.addRequestProperty("Accept", "application/octet-stream");
 		// 30 second read timeout
 		conn.setReadTimeout(30 * 1000);
@@ -301,13 +290,6 @@ public class Bootstrap {
 		}
 		Files.copy(in, Paths.get(path), StandardCopyOption.REPLACE_EXISTING);
 		in.close();
-	}
-
-	private static void addAuthorizationHeader(URLConnection conn) {
-		if (accessToken != null) {
-			// Authenticated downloads use the assetURL
-			conn.addRequestProperty("Authorization", accessToken);
-		}
 	}
 
 }
