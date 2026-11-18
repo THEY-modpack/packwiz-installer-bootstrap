@@ -2,10 +2,9 @@ package link.infra.packwiz.installer.bootstrap;
 
 import org.apache.commons.cli.Options;
 
-import java.io.File;
 import java.io.IOException;
+import java.nio.file.Path;
 import java.lang.reflect.Method;
-import java.net.MalformedURLException;
 import java.net.URL;
 import java.net.URLClassLoader;
 import java.util.jar.JarFile;
@@ -14,19 +13,40 @@ import java.util.jar.Manifest;
 public class LoadJAR {
 	
 	private static Class<?> mainClass = null;
-	
-	private static void loadClass(String path) throws MalformedURLException, ClassNotFoundException {
+	private static URLClassLoader classLoader = null;
+
+	private static void loadClass(String path) throws IOException, ClassNotFoundException {
 		if (mainClass != null) {
 			return;
 		}
-		
-		if (path == null) {
-			path = Bootstrap.JAR_NAME;
+
+		Path jarPath = Path.of(path == null ? Bootstrap.JAR_NAME : path)
+				.toAbsolutePath()
+				.normalize();
+
+		URLClassLoader loader = new URLClassLoader(
+				new URL[] { jarPath.toUri().toURL() },
+				LoadJAR.class.getClassLoader()
+		);
+
+		try {
+			Class<?> loadedClass = Class.forName(
+					"link.infra.packwiz.installer.Main",
+					true,
+					loader
+			);
+
+			classLoader = loader;
+			mainClass = loadedClass;
+		} catch (ClassNotFoundException | RuntimeException | Error e) {
+			try {
+				loader.close();
+			} catch (IOException closeException) {
+				e.addSuppressed(closeException);
+			}
+
+			throw e;
 		}
-		
-		URLClassLoader child = new URLClassLoader(new URL[] { new File(path).toURI().toURL() },
-				LoadJAR.class.getClassLoader());
-		mainClass = Class.forName("link.infra.packwiz.installer.Main", true, child);
 	}
 	
 	public static boolean addOptions(Options options, String path) {
