@@ -3,13 +3,12 @@ package link.infra.packwiz.installer.bootstrap;
 import org.apache.commons.cli.Options;
 
 import java.io.File;
-import java.io.FileInputStream;
 import java.io.IOException;
 import java.lang.reflect.Method;
 import java.net.MalformedURLException;
 import java.net.URL;
 import java.net.URLClassLoader;
-import java.util.jar.JarInputStream;
+import java.util.jar.JarFile;
 import java.util.jar.Manifest;
 
 public class LoadJAR {
@@ -50,25 +49,19 @@ public class LoadJAR {
 		// Must be casted to Object (not array) because varargs
 		mainClass.getConstructor(String[].class).newInstance((Object)args);
 	}
-	
+
 	public static String getVersion(String path) {
-		JarInputStream jarStream;
-		try {
-			jarStream = new JarInputStream(new FileInputStream(path));
+		try (JarFile jar = new JarFile(path)) {
+			Manifest manifest = jar.getManifest();
+
+			if (manifest == null) {
+				return null;
+			}
+
+			return manifest.getMainAttributes()
+					.getValue("Implementation-Version");
 		} catch (IOException e) {
 			return null;
 		}
-		String version = null;
-		// Aggressive try/catching - what if there isn't a manifest?
-		try {
-			Manifest mf = jarStream.getManifest();
-			version = mf.getMainAttributes().getValue("Implementation-Version");
-		} catch (Exception ignored) {}
-		
-		// Clean up
-		try {
-			jarStream.close();
-		} catch (IOException ignored) {}
-		return version;
 	}
 }
