@@ -1,107 +1,189 @@
+
 package link.infra.packwiz.installer.bootstrap;
 
 import javax.swing.*;
 import java.awt.*;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.InterruptedIOException;
+import java.io.*;
+import java.lang.reflect.InvocationTargetException;
 import java.net.URLConnection;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 class ConnMonitorInputStream extends InputStream {
-	private InputStream in = null;
-	private int size = -1;
-	private int bytesRead = 0;
 	private final URLConnection conn;
-	private ProgressMonitor mon;
+	private final ProgressMonitor mon;
 
-	public ConnMonitorInputStream(URLConnection conn, String message, String note) {
+	private InputStream in;
+	private long size = -1;
+	private long bytesRead = 0;
+	private long lastMillisUpdated = 0;
+	private boolean closed = false;
+
+	private static final int PROGRESS_MAX = 1000;
+	private static final long UPDATE_INTERVAL = 100;
+
+	public ConnMonitorInputStream(URLConnection conn, String message, String note) throws IOException {
 		this.conn = conn;
-		EventQueue.invokeLater(() -> {
-			mon = new ProgressMonitor(null, message, note, 0, 1);
-			mon.setMillisToDecideToPopup(1);
-			mon.setMillisToPopup(1);
+
+		ProgressMonitor[] monitor = new ProgressMonitor[1];
+
+		runOnEDT(() -> {
+			monitor[0] = new ProgressMonitor(null, message, note, 0, PROGRESS_MAX);
+			monitor[0].setMillisToDecideToPopup(1);
+			monitor[0].setMillisToPopup(1);
 		});
+
+		mon = monitor[0];
+	}
+
+	private static void runOnEDT(Runnable action) throws IOException {
+		if (EventQueue.isDispatchThread()) {
+			action.run();
+			return;
+		}
+
+		try {
+			EventQueue.invokeAndWait(action);
+		} catch (InterruptedException e) {
+			Thread.currentThread().interrupt();
+			throw new InterruptedIOException("Interrupted while updating progress monitor");
+		} catch (InvocationTargetException e) {
+			throw new IOException("Failed to update progress monitor", e.getCause());
+		}
 	}
 
 	private void setup() throws IOException {
-		if (in == null) {
-			try {
-				size = conn.getContentLength();
-				in = conn.getInputStream();
-				EventQueue.invokeLater(() -> {
-					mon.setProgress(0);
-					if (size > -1) {
-						mon.setMaximum(size);
-					}
-				});
-			} catch (IOException e) {
-				EventQueue.invokeLater(() -> mon.close());
-				throw e;
-			}
+		if (closed) {
+			throw new IOException("Stream is closed");
 		}
-	}
 
-	public int available() {
-		if (size > -1) {
-			return (size - bytesRead);
-		} else {
-			return 1;
-		}
-	}
-
-	private final AtomicBoolean wasCancelled = new AtomicBoolean();
-	private long lastMillisUpdated = System.currentTimeMillis() - 110;
-
-	private void setProgress() throws InterruptedIOException {
-		// Update at most once every 100 ms
-		if (System.currentTimeMillis() - lastMillisUpdated < 100) {
+		if (in != null) {
 			return;
 		}
-		lastMillisUpdated = System.currentTimeMillis();
-		final int progress = size > -1 ? bytesRead : -1;
-		EventQueue.invokeLater(() -> {
-			if (progress > -1) {
-				mon.setProgress(progress);
+
+		try {
+			size = conn.getContentLengthLong();
+			in = conn.getInputStream();
+
+			updateProgress(false);
+		} catch (IOException e) {
+			try {
+				closeMonitor();
+			} catch (IOException closeException) {
+				e.addSuppressed(closeException);
 			}
-			wasCancelled.set(mon.isCanceled());
+
+			throw e;
+		}
+	}
+
+	private void updateProgress(boolean completed) throws IOException {
+		long now = System.currentTimeMillis();
+
+		if (!completed && now - lastMillisUpdated < UPDATE_INTERVAL) {
+			return;
+		}
+
+		lastMillisUpdated = now;
+
+		runOnEDT(() -> {
+			if (size > 0) {
+				int progress = completed
+						? PROGRESS_MAX
+						: (int) Math.min(PROGRESS_MAX, (double) bytesRead / size * PROGRESS_MAX);
+
+				mon.setProgress(progress);
+			} else {
+				mon.setNote(bytesRead + " bytes downloaded");
+			}
+
+			if (mon.isCanceled()) {
+				// Cancellation is checked by the reading thread.
+			}
 		});
-		if (wasCancelled.get()) {
+
+		checkCancelled();
+	}
+
+	private void checkCancelled() throws IOException {
+		boolean[] cancelled = new boolean[1];
+
+		runOnEDT(() -> cancelled[0] = mon.isCanceled());
+
+		if (cancelled[0]) {
 			throw new InterruptedIOException("Download cancelled!");
 		}
 	}
 
+	private void closeMonitor() throws IOException {
+		runOnEDT(mon::close);
+	}
+
+	@Override
+	public int available() throws IOException {
+		return in == null ? 0 : in.available();
+	}
+
+	@Override
 	public int read() throws IOException {
 		setup();
-		int b = in.read();
-		if (b != -1) {
+
+		int result = in.read();
+
+		if (result != -1) {
 			bytesRead++;
-			setProgress();
+			updateProgress(false);
+		} else {
+			updateProgress(true);
 		}
-		return b;
+
+		return result;
 	}
 
-	public int read(byte[] b) throws IOException {
-		setup();
-		int read = in.read(b);
-		bytesRead += read;
-		setProgress();
-		return read;
-	}
-
+	@Override
 	public int read(byte[] b, int off, int len) throws IOException {
 		setup();
-		int read = in.read(b, off, len);
-		bytesRead += read;
-		setProgress();
-		return read;
+
+		int result = in.read(b, off, len);
+
+		if (result > 0) {
+			bytesRead += result;
+			updateProgress(false);
+		} else if (result == -1) {
+			updateProgress(true);
+		}
+
+		return result;
 	}
 
+	@Override
 	public void close() throws IOException {
-		super.close();
-		EventQueue.invokeLater(() -> mon.close());
-		if (wasCancelled.get()) {
-			throw new InterruptedIOException("Download cancelled!");
+		if (closed) {
+			return;
+		}
+
+		closed = true;
+
+		IOException error = null;
+
+		if (in != null) {
+			try {
+				in.close();
+			} catch (IOException e) {
+				error = e;
+			}
+		}
+
+		try {
+			closeMonitor();
+		} catch (IOException e) {
+			if (error == null) {
+				error = e;
+			} else {
+				error.addSuppressed(e);
+			}
+		}
+
+		if (error != null) {
+			throw error;
 		}
 	}
 }
